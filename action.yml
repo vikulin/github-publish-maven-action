@@ -1,0 +1,119 @@
+name: "GitHub Maven repo Publish Action"
+description: "Build Java project with Gradle, extract metadata, and publish artifacts to GitHub repository."
+inputs:
+  gh_pat:
+    description: "Personal Access Token for GitHub Maven artifact repository"
+    required: true
+  artifact_repo:
+    description: "GitHub repository to publish artifacts"
+    required: true
+  gradle_file_path:
+    description: "Path to the Gradle file"
+    required: true
+    default: "./gradlew"
+  java_version:
+    description: "Java version to set up"
+    required: true
+  distribution:
+    description: "Java description to set up"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout this repo
+      uses: actions/checkout@v4
+
+    - name: Set up JDK
+      uses: actions/setup-java@v4
+      with:
+        distribution: ${{ inputs.distribution }}
+        java-version: ${{ inputs.java_version }}
+    
+    - name: Extract latest commit message and hash
+      run: |
+        GIT_MESSAGE=$(git log -1 --pretty=format:"%s")
+        GIT_HASH=$(git log --pretty=format:'%h' -n 1)
+        echo "GIT_MESSAGE=$GIT_MESSAGE" >> $GITHUB_ENV
+        echo "GIT_HASH=$GIT_HASH" >> $GITHUB_ENV
+      shell: bash
+
+    - name: Install xmlstarlet and tree
+      run: sudo apt-get install -y xmlstarlet tree
+      shell: bash
+
+    - name: Build with Gradle
+      run: |
+        # Do not change the command below!
+        bash ${{ inputs.gradle_file_path }} build
+        bash ${{ inputs.gradle_file_path }} publishToMavenLocal
+      shell: bash
+
+    - name: Extract artifactId, groupId, version from generated POM file
+      run: |
+        xml_file=$(find ~/.m2/repository -type f -name "*.pom" -print -quit)
+        VERSION=$(xmlstarlet sel -N xmlns="http://maven.apache.org/POM/4.0.0" -t -v "//xmlns:project/xmlns:version" "$xml_file")
+        GROUPID=$(xmlstarlet sel -N xmlns="http://maven.apache.org/POM/4.0.0" -t -v "//xmlns:project/xmlns:groupId" "$xml_file" | sed 's/\./\//g')
+        ARTIFACTID=$(xmlstarlet sel -N xmlns="http://maven.apache.org/POM/4.0.0" -t -v "//xmlns:project/xmlns:artifactId" "$xml_file")       
+        echo "VERSION=$VERSION" >> $GITHUB_ENV
+        echo "GROUPID=$GROUPID" >> $GITHUB_ENV
+        echo "ARTIFACTID=$ARTIFACTID" >> $GITHUB_ENV
+      shell: bash
+
+    - name: Checkout artifact repo
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ inputs.artifact_repo }}
+        token: ${{ inputs.gh_pat }}
+
+    - name: Create package directories
+      run: |
+        mkdir -p ${{ env.GROUPID }}/${{ env.ARTIFACTID }}/${{ env.VERSION }}
+      shell: bash
+
+    - name: Copy Artifacts, POM, SHA-1, and MD5 files
+      run: |
+        FIRST_TERM=$(echo "${{ env.GROUPID }}" | cut -d'/' -f1)
+        cp -r ~/.m2/repository/$FIRST_TERM .
+        tree -s ${{ env.GROUPID }}/${{ env.ARTIFACTID }}
+        mv ${{ env.GROUPID }}/${{ env.ARTIFACTID }}/maven-metadata-local.xml ${{ env.GROUPID }}/${{ env.ARTIFACTID }}/maven-metadata.xml
+        
+        # Define the base path for artifact files
+        ARTIFACT_BASE="${{ env.GROUPID }}/${{ env.ARTIFACTID }}/${{ env.VERSION }}/${{ env.ARTIFACTID }}-${{ env.VERSION }}"
+        
+        # Handle JAR file (if exists)
+        if [ -f "${ARTIFACT_BASE}.jar" ]; then
+          echo "Generating checksums for JAR file"
+          sha1sum "${ARTIFACT_BASE}.jar" > "${ARTIFACT_BASE}.jar.sha1"
+          md5sum "${ARTIFACT_BASE}.jar" > "${ARTIFACT_BASE}.jar.md5"
+        fi
+        
+        # Handle AAR file (if exists)
+        if [ -f "${ARTIFACT_BASE}.aar" ]; then
+          echo "Generating checksums for AAR file"
+          sha1sum "${ARTIFACT_BASE}.aar" > "${ARTIFACT_BASE}.aar.sha1"
+          md5sum "${ARTIFACT_BASE}.aar" > "${ARTIFACT_BASE}.aar.md5"
+        fi
+        
+        # Handle POM file (should always exist)
+        if [ -f "${ARTIFACT_BASE}.pom" ]; then
+          echo "Generating checksums for POM file"
+          sha1sum "${ARTIFACT_BASE}.pom" > "${ARTIFACT_BASE}.pom.sha1"
+          md5sum "${ARTIFACT_BASE}.pom" > "${ARTIFACT_BASE}.pom.md5"
+        fi
+      shell: bash
+
+    - name: Commit and push files
+      run: |
+        git config user.name "${{ github.actor }}"
+        git config user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
+        git add .
+        git commit -m "${{ env.GIT_MESSAGE }} https://github.com/${{ github.event.repository.full_name }}/commit/${{ env.GIT_HASH }}. Version: ${{ env.VERSION }}"
+      shell: bash
+
+    - name: Push changes
+      uses: ad-m/github-push-action@master
+      with:
+        github_token: ${{ inputs.gh_pat }}
+        repository: ${{ inputs.artifact_repo }}
+        force_with_lease: true
