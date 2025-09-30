@@ -1,5 +1,6 @@
 name: "GitHub Maven repo Publish Action"
 description: "Build Java project with Gradle, extract metadata, and publish artifacts to GitHub repository."
+icon: "box"
 inputs:
   gh_pat:
     description: "Personal Access Token for GitHub Maven artifact repository"
