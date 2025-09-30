@@ -17,6 +17,10 @@ inputs:
   distribution:
     description: "Java description to set up"
     required: true
+  gradle_modules:
+    description: "Comma-separated list of Gradle modules (e.g. ':app,:mylib'). Empty means root module."
+    required: false
+    default: ""
 
 runs:
   using: "composite"
@@ -44,20 +48,20 @@ runs:
 
     - name: Build with Gradle
       run: |
-        # Do not change the command below!
-        bash ${{ inputs.gradle_file_path }} build
-        bash ${{ inputs.gradle_file_path }} publishToMavenLocal
-      shell: bash
+        IFS=',' read -ra MODULES <<< "${{ inputs.gradle_modules }}"
+        GRADLE_PATH="${{ inputs.gradle_file_path }}"
 
-    - name: Extract artifactId, groupId, version from generated POM file
-      run: |
-        xml_file=$(find ~/.m2/repository -type f -name "*.pom" -print -quit)
-        VERSION=$(xmlstarlet sel -N xmlns="http://maven.apache.org/POM/4.0.0" -t -v "//xmlns:project/xmlns:version" "$xml_file")
-        GROUPID=$(xmlstarlet sel -N xmlns="http://maven.apache.org/POM/4.0.0" -t -v "//xmlns:project/xmlns:groupId" "$xml_file" | sed 's/\./\//g')
-        ARTIFACTID=$(xmlstarlet sel -N xmlns="http://maven.apache.org/POM/4.0.0" -t -v "//xmlns:project/xmlns:artifactId" "$xml_file")       
-        echo "VERSION=$VERSION" >> $GITHUB_ENV
-        echo "GROUPID=$GROUPID" >> $GITHUB_ENV
-        echo "ARTIFACTID=$ARTIFACTID" >> $GITHUB_ENV
+        if [ ${#MODULES[@]} -eq 0 ] || [ -z "${MODULES[0]}" ]; then
+          echo "No specific modules provided. Building root project..."
+          bash "$GRADLE_PATH" build
+          bash "$GRADLE_PATH" publishToMavenLocal
+        else
+          for module in "${MODULES[@]}"; do
+            echo "Building module: $module"
+            bash "$GRADLE_PATH" "${module}:build"
+            bash "$GRADLE_PATH" "${module}:publishToMavenLocal"
+          done
+        fi
       shell: bash
 
     - name: Checkout artifact repo
@@ -65,55 +69,79 @@ runs:
       with:
         repository: ${{ inputs.artifact_repo }}
         token: ${{ inputs.gh_pat }}
+        path: artifacts
 
-    - name: Create package directories
+    - name: Process all generated POM files and copy artifacts
       run: |
-        mkdir -p ${{ env.GROUPID }}/${{ env.ARTIFACTID }}/${{ env.VERSION }}
-      shell: bash
-
-    - name: Copy Artifacts, POM, SHA-1, and MD5 files
-      run: |
-        FIRST_TERM=$(echo "${{ env.GROUPID }}" | cut -d'/' -f1)
-        cp -r ~/.m2/repository/$FIRST_TERM .
-        tree -s ${{ env.GROUPID }}/${{ env.ARTIFACTID }}
-        mv ${{ env.GROUPID }}/${{ env.ARTIFACTID }}/maven-metadata-local.xml ${{ env.GROUPID }}/${{ env.ARTIFACTID }}/maven-metadata.xml
-        
-        # Define the base path for artifact files
-        ARTIFACT_BASE="${{ env.GROUPID }}/${{ env.ARTIFACTID }}/${{ env.VERSION }}/${{ env.ARTIFACTID }}-${{ env.VERSION }}"
-        
-        # Handle JAR file (if exists)
-        if [ -f "${ARTIFACT_BASE}.jar" ]; then
-          echo "Generating checksums for JAR file"
-          sha1sum "${ARTIFACT_BASE}.jar" > "${ARTIFACT_BASE}.jar.sha1"
-          md5sum "${ARTIFACT_BASE}.jar" > "${ARTIFACT_BASE}.jar.md5"
-        fi
-        
-        # Handle AAR file (if exists)
-        if [ -f "${ARTIFACT_BASE}.aar" ]; then
-          echo "Generating checksums for AAR file"
-          sha1sum "${ARTIFACT_BASE}.aar" > "${ARTIFACT_BASE}.aar.sha1"
-          md5sum "${ARTIFACT_BASE}.aar" > "${ARTIFACT_BASE}.aar.md5"
-        fi
-        
-        # Handle POM file (should always exist)
-        if [ -f "${ARTIFACT_BASE}.pom" ]; then
-          echo "Generating checksums for POM file"
-          sha1sum "${ARTIFACT_BASE}.pom" > "${ARTIFACT_BASE}.pom.sha1"
-          md5sum "${ARTIFACT_BASE}.pom" > "${ARTIFACT_BASE}.pom.md5"
-        fi
+        echo "Copying all Maven repository content to artifacts folder..."
+        cp -r ~/.m2/repository/* artifacts/ 2>/dev/null || true
+        # Find all POM files and process each one sequentially
+        find ~/.m2/repository -type f -name "*.pom" | while read xml_file; do
+          echo "Processing POM file: $xml_file"
+          
+          # Extract metadata from POM file
+          VERSION=$(xmlstarlet sel -N xmlns="http://maven.apache.org/POM/4.0.0" -t -v "//xmlns:project/xmlns:version" "$xml_file")
+          GROUPID=$(xmlstarlet sel -N xmlns="http://maven.apache.org/POM/4.0.0" -t -v "//xmlns:project/xmlns:groupId" "$xml_file" | sed 's/\./\//g')
+          ARTIFACTID=$(xmlstarlet sel -N xmlns="http://maven.apache.org/POM/4.0.0" -t -v "//xmlns:project/xmlns:artifactId" "$xml_file")
+          
+          echo "Processing artifact: $GROUPID/$ARTIFACTID:$VERSION"
+          
+          # Create directory structure in artifacts folder
+          mkdir -p "artifacts/$GROUPID/$ARTIFACTID/$VERSION"
+          
+          # Copy entire module structure from .m2 to artifacts folder
+          FIRST_TERM=$(echo "$GROUPID" | cut -d'/' -f1)
+          if [ -d "~/.m2/repository/$FIRST_TERM" ]; then
+            cp -r "~/.m2/repository/$FIRST_TERM"/* artifacts/ 2>/dev/null || true
+          fi
+          
+          # Rename maven-metadata-local.xml to maven-metadata.xml if it exists
+          if [ -f "artifacts/$GROUPID/$ARTIFACTID/maven-metadata-local.xml" ]; then
+            mv "artifacts/$GROUPID/$ARTIFACTID/maven-metadata-local.xml" "artifacts/$GROUPID/$ARTIFACTID/maven-metadata.xml"
+          fi
+          
+          # Define the base path for artifact files in artifacts folder
+          ARTIFACT_BASE="artifacts/$GROUPID/$ARTIFACTID/$VERSION/${ARTIFACTID}-${VERSION}"
+          
+          # Handle JAR file (if exists)
+          if [ -f "${ARTIFACT_BASE}.jar" ]; then
+            echo "Generating checksums for JAR file: ${ARTIFACT_BASE}.jar"
+            sha1sum "${ARTIFACT_BASE}.jar" > "${ARTIFACT_BASE}.jar.sha1"
+            md5sum "${ARTIFACT_BASE}.jar" > "${ARTIFACT_BASE}.jar.md5"
+          fi
+          
+          # Handle AAR file (if exists)
+          if [ -f "${ARTIFACT_BASE}.aar" ]; then
+            echo "Generating checksums for AAR file: ${ARTIFACT_BASE}.aar"
+            sha1sum "${ARTIFACT_BASE}.aar" > "${ARTIFACT_BASE}.aar.sha1"
+            md5sum "${ARTIFACT_BASE}.aar" > "${ARTIFACT_BASE}.aar.md5"
+          fi
+          
+          # Handle POM file (should always exist)
+          if [ -f "${ARTIFACT_BASE}.pom" ]; then
+            echo "Generating checksums for POM file: ${ARTIFACT_BASE}.pom"
+            sha1sum "${ARTIFACT_BASE}.pom" > "${ARTIFACT_BASE}.pom.sha1"
+            md5sum "${ARTIFACT_BASE}.pom" > "${ARTIFACT_BASE}.pom.md5"
+          fi
+          # Display the final directory structure
+          tree -s artifacts/$GROUPID/$ARTIFACTID/$VERSION
+          echo "Completed processing artifact: $GROUPID/$ARTIFACTID:$VERSION"
+        done
       shell: bash
 
     - name: Commit and push files
       run: |
+        cd artifacts
         git config user.name "${{ github.actor }}"
         git config user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
         git add .
         git commit -m "${{ env.GIT_MESSAGE }} https://github.com/${{ github.event.repository.full_name }}/commit/${{ env.GIT_HASH }}. Version: ${{ env.VERSION }}"
       shell: bash
-
+      
     - name: Push changes
       uses: ad-m/github-push-action@master
       with:
         github_token: ${{ inputs.gh_pat }}
         repository: ${{ inputs.artifact_repo }}
         force_with_lease: true
+        directory: artifacts
