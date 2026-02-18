@@ -32,7 +32,7 @@ You can use this action in your workflows. Here's an example:
             uses: RiV-chain/github-publish-maven-action@main
             with:
               gh_pat: ${{ secrets.PAT }}
-              artifact_repo: 'RiV-chain/artifact'
+              artifact_repo: 'vikulin/artifact'
               gradle_file_path: './gradlew'
               gradle_modules: ':app,:mylib'
               java_version: '21'
@@ -102,7 +102,7 @@ Your Maven repository URL will be:
 
     repositories {
         maven {
-            url "https://github.com/RiV-chain/artifact/raw/main"
+            url "https://github.com/vikulin/artifact/raw/main"
         }
     }
 
@@ -110,7 +110,7 @@ Your Maven repository URL will be:
 
     repositories {
         maven {
-            url = uri("https://github.com/RiV-chain/artifact/raw/main")
+            url = uri("https://github.com/vikulin/artifact/raw/main")
         }
     }
 
